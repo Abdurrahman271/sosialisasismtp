@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f172a">
+    <title>Sosialisasi IP Phone</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@5/dist/email.min.js"></script>
+    <!-- Load Configuration dari root -->
+    <script src="config.js"></script>
+    <style>
+        @keyframes fadeInUp {
+            0% { opacity: 0; transform: translateY(30px) scale(0.98); }
+            100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .animate-fade-in-up {
+            animation: fadeInUp 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.08);
+        }
+        body { background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%); }
+        select {
+            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2364748b' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+            background-position: right 1.2rem center;
+            background-repeat: no-repeat;
+            background-size: 1.25em 1.25em;
+            padding-right: 2.75rem;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center font-sans p-4 sm:p-6 text-slate-800 overflow-hidden relative">
+    <div class="fixed top-[-15%] left-[-10%] w-[45vw] h-[45vw] rounded-full bg-blue-400 opacity-10 blur-[100px] -z-10"></div>
+    <div class="fixed bottom-[-15%] right-[-10%] w-[55vw] h-[55vw] rounded-full bg-indigo-400 opacity-10 blur-[100px] -z-10"></div>
+
+    <div id="root" class="w-full max-w-lg relative z-10"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function getConfig() {
+            try {
+                const testConfig = localStorage.getItem('app_config_override');
+                if (testConfig) {
+                    const parsed = JSON.parse(testConfig);
+                    // ANTI-CRASH: Cek apakah format lama atau baru. Jika format lama (tidak ada emailjsConfigs), abaikan.
+                    if (parsed && Array.isArray(parsed.emailjsConfigs)) {
+                        return parsed;
+                    } else {
+                        localStorage.removeItem('app_config_override'); // Hapus cache usang
+                    }
+                }
+            } catch(e) {}
+            return typeof APP_CONFIG !== 'undefined' ? APP_CONFIG : { emailjsConfigs: [], app: {}, meetings: [] };
+        }
+
+        function getErrorMessage(error) {
+            const raw = String(error?.text || error?.message || 'Kesalahan tidak diketahui.');
+            if (/public key/i.test(raw)) return 'Public Key EmailJS tidak valid.';
+            if (/template/i.test(raw)) return 'Template EmailJS tidak ditemukan.';
+            if (/service/i.test(raw)) return 'Email Service belum aktif di EmailJS.';
+            if (/recipient|to email/i.test(raw)) return 'Alamat email penerima tidak valid.';
+            if (/network|fetch/i.test(raw)) return 'Koneksi terputus. Periksa jaringan Anda.';
+            return `Gagal mengirim email: ${raw}`;
+        }
+
+        async function sendMeetingEmail(config, recipient, meeting) {
+            if (!window.emailjs) throw new Error('Sistem email sedang dimuat. Periksa koneksi internet Anda.');
+            
+            let activeConfig = config.emailjsConfigs.find(c => c.isActive);
+            if (!activeConfig && config.emailjsConfigs.length > 0) activeConfig = config.emailjsConfigs[0];
+            if (!activeConfig) throw new Error('Konfigurasi SMTP belum diatur oleh admin.');
+
+            const templateParams = {
+                to_name: recipient.name.trim(),
+                to_email: recipient.email.trim(),
+                meeting_date: meeting.date_string,
+                meeting_link: meeting.meeting_link,
+                meeting_password: meeting.meeting_password || 'Tidak ada',
+                app_name: config.app.title || 'Sosialisasi'
+            };
+
+            return window.emailjs.send(
+                activeConfig.serviceId.trim(),
+                activeConfig.templateId.trim(),
+                templateParams,
+                { publicKey: activeConfig.publicKey.trim() }
+            );
+        }
+
+        function App() {
+            const [config, setConfig] = useState(getConfig());
+            // Fallback aman untuk meeting id
+            const initialMeetingId = (config.meetings && config.meetings.length > 0) ? config.meetings[0].id : '';
+            const [formData, setFormData] = useState({ name: '', email: '', meeting_id: initialMeetingId });
+            const [loading, setLoading] = useState(false);
+            const [success, setSuccess] = useState(false);
+            const [errorMsg, setErrorMsg] = useState('');
+            const [directLinkMode, setDirectLinkMode] = useState(false);
+            const [finalDetails, setFinalDetails] = useState(null);
+
+            useEffect(() => {
+                const handleStorageChange = () => setConfig(getConfig());
+                window.addEventListener('storage', handleStorageChange);
+                return () => window.removeEventListener('storage', handleStorageChange);
+            }, []);
+
+            const handleSubmit = async (event) => {
+                event.preventDefault();
+                if (loading) return;
+                
+                if (/[<>]/.test(formData.name) || /[<>]/.test(formData.email)) {
+                    setErrorMsg('Karakter tidak valid (Tanda kurung sudut <> tidak diizinkan).');
+                    return;
+                }
+
+                setLoading(true);
+                setErrorMsg('');
+
+                const selectedMeeting = config.meetings.find(m => m.id === formData.meeting_id);
+                if (!selectedMeeting || !selectedMeeting.meeting_link) {
+                    setErrorMsg('Link meeting belum tersedia.');
+                    setLoading(false);
+                    return;
+                }
+
+                try {
+                    await sendMeetingEmail(config, formData, selectedMeeting);
+                    setSuccess(true);
+                } catch (error) {
+                    console.error(error);
+                    setFinalDetails(selectedMeeting);
+                    setErrorMsg(getErrorMessage(error));
+                    setDirectLinkMode(true);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            if (success) {
+                return (
+                    <div className="glass-panel animate-fade-in-up p-8 sm:p-10 rounded-[2rem] text-center">
+                        <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-6 border border-green-100 shadow-sm">
+                            <svg className="w-10 h-10 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" /></svg>
+                        </div>
+                        <h2 className="text-2xl font-extrabold text-slate-800 mb-3">Pendaftaran Sukses</h2>
+                        <p className="text-slate-600 mb-4 text-sm">Akses meeting telah dikirimkan ke alamat email Anda:</p>
+                        <div className="bg-slate-100/70 border border-slate-200/60 py-3 px-5 rounded-2xl inline-block font-semibold text-slate-700 mb-8 shadow-sm break-all">{formData.email}</div>
+                        <button onClick={() => window.location.reload()} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-4 rounded-2xl transition-all shadow-lg hover:scale-[1.02]">Kembali</button>
+                    </div>
+                );
+            }
+
+            if (directLinkMode && finalDetails) {
+                return (
+                    <div className="glass-panel animate-fade-in-up p-8 sm:p-10 rounded-[2rem]">
+                        <div className="text-center mb-6">
+                            <div className="inline-flex p-3 bg-amber-50 border border-amber-100 rounded-2xl mb-4 text-amber-600">
+                                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v4m0 4h.01M10.3 3.9L1.8 18.5A2 2 0 003.5 21h17a2 2 0 001.7-2.5L13.7 3.9a2 2 0 00-3.4 0z" /></svg>
+                            </div>
+                            <h2 className="text-xl font-bold text-slate-900">Pengiriman Email Terhambat</h2>
+                            <p className="text-sm text-slate-600 mt-2">Gunakan detail akses di bawah ini:</p>
+                        </div>
+                        <div className="bg-white/60 border border-slate-200/60 p-5 rounded-2xl mb-6 shadow-sm">
+                            <p className="text-[11px] font-bold text-slate-500 mb-1 uppercase">Jadwal</p>
+                            <p className="text-slate-800 font-semibold mb-4 text-sm">{finalDetails.date_string}</p>
+                            <p className="text-[11px] font-bold text-slate-500 mb-1 uppercase">Passcode</p>
+                            <p className="text-blue-700 font-mono font-bold text-base bg-blue-50 border border-blue-100 inline-block px-3 py-1 rounded-lg mb-4">{finalDetails.meeting_password || 'Tanpa Password'}</p>
+                        </div>
+                        <a href={finalDetails.meeting_link} target="_blank" className="block w-full bg-blue-600 hover:bg-blue-700 text-white text-center font-semibold py-4 rounded-2xl shadow-lg transition-all hover:scale-[1.02]">Bergabung Sekarang</a>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="glass-panel animate-fade-in-up p-8 sm:p-10 rounded-[2rem]">
+                    <div className="text-center mb-8">
+                        <div className="inline-flex p-4 bg-blue-50/80 rounded-2xl mb-4 text-blue-600 border border-blue-100 shadow-sm transition-transform hover:scale-110 duration-300">
+                            <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 8h2a2 2 0 012 2v6a2 2 0 01-2 2h-2v4l-4-4H9a1.994 1.994 0 01-1.414-.586M7 16H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v2" /></svg>
+                        </div>
+                        <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight mb-2">{config.app?.title || "Pendaftaran"}</h1>
+                        <p className="text-slate-500 text-sm leading-relaxed">{config.app?.subtitle}</p>
+                    </div>
+
+                    {errorMsg && (
+                        <div className="flex items-start bg-red-50 text-red-700 p-4 mb-6 rounded-2xl border border-red-100 text-sm shadow-sm animate-fade-in-up">
+                            <svg className="w-5 h-5 mr-3 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                            <span>{errorMsg}</span>
+                        </div>
+                    )}
+
+                    <form onSubmit={handleSubmit} className="space-y-5">
+                        <div>
+                            <label className="block text-sm font-bold text-slate-700 mb-2">Nama Lengkap</label>
+                            <input required type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})}
+                                className="w-full bg-white/80 border border-slate-200 px-5 py-3.5 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all hover:border-slate-300" />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-bold text-slate-700 mb-2">Email Aktif</label>
+                            <input required type="email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})}
+                                className="w-full bg-white/80 border border-slate-200 px-5 py-3.5 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all hover:border-slate-300" />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-bold text-slate-700 mb-2">Pilih Jadwal</label>
+                            <select required value={formData.meeting_id} onChange={e => setFormData({...formData, meeting_id: e.target.value})}
+                                className="w-full appearance-none bg-white/80 border border-slate-200 px-5 py-3.5 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all hover:border-slate-300">
+                                {config.meetings && config.meetings.map(m => <option key={m.id} value={m.id}>{m.date_string}</option>)}
+                            </select>
+                        </div>
+                        <button type="submit" disabled={loading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-2xl shadow-lg transition-all hover:scale-[1.02] active:scale-[0.98] mt-2 flex justify-center items-center disabled:opacity-70 disabled:hover:scale-100">
+                            {loading ? 'Memproses...' : 'Dapatkan Akses Meeting'}
+                        </button>
+                    </form>
+                </div>
+            );
+        }
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
