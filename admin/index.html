@@ -1,1 +1,329 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard & Pengetesan SMTP/EmailJS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@5/dist/email.min.js"></script>
+    <!-- Load Configuration dari root directory -->
+    <script src="../config.js"></script>
+</head>
+<body class="bg-slate-50 min-h-screen font-sans text-slate-800">
+    <div id="root"></div>
 
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function AdminApp() {
+            // ANTI CRASH LOGIC
+            const getInitialConfig = () => {
+                const saved = localStorage.getItem('app_config_override');
+                if (saved) {
+                    try { 
+                        const parsed = JSON.parse(saved); 
+                        // Validasi format baru
+                        if (parsed && Array.isArray(parsed.emailjsConfigs)) {
+                            return parsed;
+                        } else {
+                            // Hapus yang lama jika tidak valid agar tidak blank page
+                            localStorage.removeItem('app_config_override');
+                        }
+                    } catch(e){}
+                }
+                return typeof APP_CONFIG !== 'undefined' ? APP_CONFIG : {
+                    emailjsConfigs: [{ id: 'cfg_1', name: 'SMTP Default', serviceId: '', templateId: '', publicKey: '', isActive: true }],
+                    app: { title: 'Sosialisasi IP Phone', subtitle: 'Pilih jadwal kegiatan.' },
+                    meetings: [{ id: '1', date_string: 'Contoh: Senin, 1 Jan 2026', meeting_link: '', meeting_password: '' }]
+                };
+            };
+
+            const [config, setConfig] = useState(getInitialConfig());
+            const [selectedConfigId, setSelectedConfigId] = useState(config.emailjsConfigs?.[0]?.id || '');
+            const [testEmail, setTestEmail] = useState('');
+            const [log, setLog] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [showCode, setShowCode] = useState(false);
+
+            useEffect(() => {
+                localStorage.setItem('app_config_override', JSON.stringify(config));
+            }, [config]);
+
+            const addLog = (type, message) => {
+                setLog(prev => [{ time: new Date().toLocaleTimeString(), type, message }, ...prev]);
+            };
+
+            // Fallback yang aman menghindari error blank
+            const activeConfigObj = config.emailjsConfigs?.find(c => c.id === selectedConfigId) || config.emailjsConfigs?.[0] || { name: 'Empty', serviceId: '', templateId: '', publicKey: '', isActive: false };
+            const activeConfigIndex = config.emailjsConfigs?.findIndex(c => c.id === selectedConfigId);
+            const finalActiveIndex = activeConfigIndex !== -1 ? activeConfigIndex : 0;
+
+            const handleUpdateConfig = (field, value) => {
+                const newConfigs = [...config.emailjsConfigs];
+                newConfigs[finalActiveIndex] = { ...newConfigs[finalActiveIndex], [field]: value };
+                setConfig({ ...config, emailjsConfigs: newConfigs });
+            };
+
+            const handleSetActive = () => {
+                const newConfigs = config.emailjsConfigs.map((c, i) => ({
+                    ...c, isActive: i === finalActiveIndex
+                }));
+                setConfig({ ...config, emailjsConfigs: newConfigs });
+                addLog('info', `✅ [${activeConfigObj.name}] ditetapkan sebagai SMTP Aktif untuk sistem.`);
+            };
+
+            const addNewConfig = () => {
+                const newId = 'cfg_' + Date.now();
+                setConfig({
+                    ...config,
+                    emailjsConfigs: [...(config.emailjsConfigs || []), { id: newId, name: 'SMTP Baru', serviceId: '', templateId: '', publicKey: '', isActive: false }]
+                });
+                setSelectedConfigId(newId);
+            };
+
+            const deleteConfig = () => {
+                if (!config.emailjsConfigs || config.emailjsConfigs.length <= 1) return alert('Tidak bisa menghapus config terakhir!');
+                const newConfigs = config.emailjsConfigs.filter((_, i) => i !== finalActiveIndex);
+                if (newConfigs.length > 0 && activeConfigObj.isActive) {
+                    newConfigs[0].isActive = true; // Jadikan yang pertama aktif
+                }
+                setConfig({ ...config, emailjsConfigs: newConfigs });
+                setSelectedConfigId(newConfigs[0].id);
+            };
+
+            // ---- TESTING LOGIC (AUTO NEGATIVE TEST + NORMAL) ----
+            const executeTest = async () => {
+                if (!testEmail) return addLog('error', 'Harap masukkan alamat email pengetesan.');
+                
+                let targetEmail = testEmail.trim();
+                setLoading(true);
+                
+                // --- NEGATIVE TEST PHASE ---
+                addLog('info', `🔄 Menjalankan pre-flight test (Skenario Negative)...`);
+                let preFlightSuccess = true;
+                
+                try {
+                    await window.emailjs.send('service_invalid_xxx', activeConfigObj.templateId.trim(), { to_email: targetEmail }, { publicKey: activeConfigObj.publicKey.trim() });
+                    addLog('error', `⚠️ Anomali: Skenario Negative (Invalid ID) gagal ditangkap.`);
+                    preFlightSuccess = false;
+                } catch (err) {
+                    addLog('info', `✔️ Pre-flight validation berhasil menahan error: ${err?.text || 'Invalid Service'}`);
+                }
+
+                if(!preFlightSuccess) {
+                    setLoading(false);
+                    return;
+                }
+
+                // --- NORMAL TEST PHASE ---
+                addLog('info', `📡 Menghubungkan SMTP: ${activeConfigObj.name}...`);
+                
+                try {
+                    await window.emailjs.send(
+                        activeConfigObj.serviceId.trim(), activeConfigObj.templateId.trim(),
+                        {
+                            to_name: 'Admin Tester',
+                            to_email: targetEmail,
+                            meeting_date: config.meetings?.[0]?.date_string || 'Jadwal Test',
+                            meeting_link: config.meetings?.[0]?.meeting_link || 'https://zoom.test',
+                            meeting_password: config.meetings?.[0]?.meeting_password || 'TEST-PASS',
+                            app_name: config.app?.title || 'Sosialisasi'
+                        },
+                        { publicKey: activeConfigObj.publicKey.trim() }
+                    );
+                    
+                    addLog('success', `Berhasil! Email terkirim ke ${targetEmail}.`);
+                } catch (error) {
+                    const errorMsg = error?.text || error?.message || 'Koneksi Ditolak.';
+                    addLog('error', `Gagal: ${errorMsg}`);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const generateConfigCode = () => {
+                return `const APP_CONFIG = ${JSON.stringify(config, null, 4)};`;
+            };
+
+            return (
+                <div className="max-w-7xl mx-auto p-4 sm:p-6 pb-20">
+                    <header className="mb-8 flex flex-col md:flex-row md:items-end justify-between border-b pb-4">
+                        <div>
+                            <h1 className="text-3xl font-bold text-slate-900">🔧 Admin Panel: Setup & Test Realtime</h1>
+                            <p className="text-slate-500 mt-2">Konfigurasi Multi-SMTP (EmailJS) & Data Jadwal</p>
+                        </div>
+                        <div className="mt-4 md:mt-0 flex gap-3">
+                            <a href="../" target="_blank" className="bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2 rounded-xl font-medium transition-all text-sm">Lihat Halaman Utama ↗</a>
+                            <button onClick={() => setShowCode(!showCode)} className="bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-xl font-medium transition-all text-sm shadow-md">
+                                {showCode ? 'Tutup Export Code' : 'Export Config.js'}
+                            </button>
+                        </div>
+                    </header>
+
+                    {showCode && (
+                        <div className="mb-8 bg-slate-900 text-green-400 p-6 rounded-2xl font-mono text-sm shadow-xl overflow-x-auto relative">
+                            <button onClick={() => {navigator.clipboard.writeText(generateConfigCode()); alert('Code disalin!');}} className="absolute top-4 right-4 bg-slate-700 text-white px-3 py-1 rounded-lg text-xs hover:bg-slate-600">Copy Code</button>
+                            <p className="text-slate-400 mb-2">// Salin seluruh kode di bawah ini, buka file config.js di root folder, lalu paste/timpa isinya.</p>
+                            <pre>{generateConfigCode()}</pre>
+                        </div>
+                    )}
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        {/* LEFT: Konfigurasi */}
+                        <div className="lg:col-span-2 space-y-6">
+                            
+                            {/* PENGATURAN EMAIL */}
+                            <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-6">
+                                    <h2 className="text-xl font-bold text-slate-800 flex items-center">
+                                        <span className="text-2xl mr-2">📧</span> Pengaturan SMTP
+                                    </h2>
+                                    <div className="flex items-center gap-2 mt-4 sm:mt-0">
+                                        <select value={selectedConfigId} onChange={e => setSelectedConfigId(e.target.value)}
+                                            className="border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 font-bold bg-slate-50">
+                                            {config.emailjsConfigs?.map(c => (
+                                                <option key={c.id} value={c.id}>{c.name} {c.isActive ? '(🔥 Aktif)' : ''}</option>
+                                            ))}
+                                        </select>
+                                        <button onClick={addNewConfig} className="bg-slate-100 border border-slate-300 px-3 py-2 rounded-lg text-sm hover:bg-slate-200" title="Tambah Config Baru">+</button>
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="md:col-span-2">
+                                        <label className="block text-xs font-bold text-slate-600 mb-1 uppercase">Nama Config</label>
+                                        <input type="text" className="w-full border border-slate-300 p-3 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none font-bold" 
+                                            value={activeConfigObj.name} onChange={e => handleUpdateConfig('name', e.target.value)} />
+                                    </div>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-xs font-bold text-slate-600 mb-1 uppercase">Service ID</label>
+                                        <input type="text" className="w-full border border-slate-300 p-3 rounded-xl text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none" 
+                                            value={activeConfigObj.serviceId} onChange={e => handleUpdateConfig('serviceId', e.target.value)} />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1 uppercase">Template ID</label>
+                                        <input type="text" className="w-full border border-slate-300 p-3 rounded-xl text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none" 
+                                            value={activeConfigObj.templateId} onChange={e => handleUpdateConfig('templateId', e.target.value)} />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1 uppercase">Public Key</label>
+                                        <input type="text" className="w-full border border-slate-300 p-3 rounded-xl text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none" 
+                                            value={activeConfigObj.publicKey} onChange={e => handleUpdateConfig('publicKey', e.target.value)} />
+                                    </div>
+                                </div>
+                                <div className="mt-6 flex justify-between items-center border-t pt-4">
+                                    <button onClick={deleteConfig} className="text-red-500 hover:text-red-700 text-sm font-bold">Hapus Config Ini</button>
+                                    {!activeConfigObj.isActive ? (
+                                        <button onClick={handleSetActive} className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl text-sm font-bold shadow-md transition-colors">
+                                            Jadikan Default (Aktif)
+                                        </button>
+                                    ) : (
+                                        <span className="bg-green-100 text-green-700 px-4 py-2 rounded-xl text-sm font-bold flex items-center">
+                                            <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" /></svg>
+                                            Config Aktif
+                                        </span>
+                                    )}
+                                </div>
+                            </section>
+
+                            {/* PENGATURAN APLIKASI */}
+                            <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                                <h2 className="text-xl font-bold text-slate-800 mb-4 flex items-center">
+                                    <span className="text-2xl mr-2">🎨</span> Tampilan Halaman Utama
+                                </h2>
+                                <div className="grid grid-cols-1 gap-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1 uppercase">Judul Halaman</label>
+                                        <input type="text" className="w-full border border-slate-300 p-3 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
+                                            value={config.app?.title} onChange={e => setConfig({...config, app: {...config.app, title: e.target.value}})} />
+                                    </div>
+                                </div>
+                            </section>
+
+                            {/* JADWAL MEETINGS */}
+                            <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                                <h2 className="text-xl font-bold text-slate-800 mb-4 flex items-center justify-between">
+                                    <div><span className="text-2xl mr-2">📅</span> Pengaturan Jadwal Meeting</div>
+                                    <button onClick={() => setConfig({...config, meetings: [...(config.meetings||[]), { id: Date.now().toString(), date_string: 'Jadwal Baru', meeting_link: '', meeting_password: '' }]})} 
+                                        className="text-xs bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg font-bold hover:bg-blue-200">+ Tambah</button>
+                                </h2>
+                                <div className="space-y-4">
+                                    {config.meetings?.map((m, index) => (
+                                        <div key={m.id} className="bg-slate-50 border border-slate-200 p-4 rounded-xl flex flex-col md:flex-row gap-4">
+                                            <div className="flex-1 space-y-3">
+                                                <input type="text" placeholder="Tanggal (contoh: Rabu, 11 Nov 18:30)" className="w-full border border-slate-300 p-2.5 rounded-lg text-sm font-semibold focus:ring-2 focus:ring-blue-500 outline-none" 
+                                                    value={m.date_string} onChange={e => {
+                                                        const newMeetings = [...config.meetings];
+                                                        newMeetings[index].date_string = e.target.value;
+                                                        setConfig({...config, meetings: newMeetings});
+                                                    }} />
+                                                <div className="flex gap-2">
+                                                    <input type="text" placeholder="Link Zoom/Teams" className="w-2/3 border border-slate-300 p-2.5 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
+                                                        value={m.meeting_link} onChange={e => {
+                                                            const newMeetings = [...config.meetings];
+                                                            newMeetings[index].meeting_link = e.target.value;
+                                                            setConfig({...config, meetings: newMeetings});
+                                                        }} />
+                                                    <input type="text" placeholder="Password" className="w-1/3 border border-slate-300 p-2.5 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
+                                                        value={m.meeting_password} onChange={e => {
+                                                            const newMeetings = [...config.meetings];
+                                                            newMeetings[index].meeting_password = e.target.value;
+                                                            setConfig({...config, meetings: newMeetings});
+                                                        }} />
+                                                </div>
+                                            </div>
+                                            <button onClick={() => {
+                                                const newMeetings = config.meetings.filter((_, i) => i !== index);
+                                                setConfig({...config, meetings: newMeetings});
+                                            }} className="text-red-500 hover:text-red-700 text-sm font-bold h-fit md:mt-2">Hapus</button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </section>
+                        </div>
+
+                        {/* RIGHT: Pengetesan Realtime */}
+                        <div className="space-y-6">
+                            <section className="bg-indigo-900 p-6 rounded-2xl shadow-lg text-white">
+                                <h2 className="text-xl font-bold mb-2 flex items-center">
+                                    <span className="text-2xl mr-2">🚀</span> Live SMTP Test
+                                </h2>
+                                <p className="text-indigo-200 text-sm mb-6">Uji coba pengaturan "{activeConfigObj.name}" langsung ke email Anda.</p>
+                                
+                                <div className="space-y-3 mb-6">
+                                    <input type="email" placeholder="Masukkan email Anda..." className="w-full bg-indigo-800/50 border border-indigo-700 text-white placeholder-indigo-400 p-3 rounded-xl text-sm focus:ring-2 focus:ring-indigo-400 outline-none" 
+                                        value={testEmail} onChange={e => setTestEmail(e.target.value)} />
+                                    <button onClick={executeTest} disabled={loading} className="w-full bg-indigo-500 hover:bg-indigo-400 text-white font-bold py-3 rounded-xl transition-all disabled:opacity-50 shadow-md flex justify-center items-center">
+                                        {loading ? 'Sedang Memeriksa & Mengirim...' : 'Kirim Email Pengetesan'}
+                                    </button>
+                                </div>
+
+                                <div className="bg-black/40 rounded-xl p-4 h-64 overflow-y-auto font-mono text-[11px] leading-relaxed">
+                                    <div className="text-indigo-300 mb-2">--- System Logs ---</div>
+                                    {log.length === 0 && <div className="text-slate-500">Belum ada aktivitas...</div>}
+                                    {log.map((l, i) => (
+                                        <div key={i} className={`mb-2 ${l.type === 'error' ? 'text-red-400' : l.type === 'success' ? 'text-green-400' : 'text-blue-300'}`}>
+                                            <span className="opacity-50">[{l.time}]</span> {l.message}
+                                        </div>
+                                    ))}
+                                </div>
+                            </section>
+                            
+                            <div className="bg-blue-50 border border-blue-200 p-5 rounded-2xl">
+                                <h3 className="font-bold text-blue-800 mb-1">Catatan Penting</h3>
+                                <p className="text-xs text-blue-700 leading-relaxed mb-3">Sistem ini menyimpan settingan sementara di browser (Local Storage) agar bisa ditest. Jangan lupa <strong>Export Code</strong> bila sudah selesai!</p>
+                                <button onClick={() => {localStorage.removeItem('app_config_override'); window.location.reload();}} className="text-xs bg-white border border-red-200 text-red-600 px-3 py-2 rounded-lg font-bold hover:bg-red-50 w-full transition-colors">Reset Ke Default System</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<AdminApp />);
+    </script>
+</body>
+</html>
